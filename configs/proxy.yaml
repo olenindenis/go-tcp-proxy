@@ -1,0 +1,35 @@
+# tcp-proxy configuration. Every value can be overridden with environment variables:
+#   PROXY_<SECTION>_<KEY>, e.g. PROXY_DEFAULTS_TIMEOUTS_IDLE=5m
+#   PROXY_ROUTE_<NAME>_LISTEN / PROXY_ROUTE_<NAME>_UPSTREAM for a route (name upper-cased, non-alphanumerics -> "_")
+
+admin_listen: ":9090"     # /metrics, /healthz, /readyz
+log_level: info           # debug | info | warn | error
+shutdown_timeout: 30s     # how long to drain sessions on SIGTERM before closing them forcibly
+
+# Inherited by every route; any field can be overridden inside a route.
+defaults:
+  limits:
+    max_connections: 1000       # concurrent sessions per route
+    max_connections_per_ip: 0   # 0 = unlimited
+  timeouts:
+    dial: 5s          # connect to upstream
+    idle: 15m         # close a session with no traffic in either direction
+    max_session: 0s   # absolute session lifetime, 0 = unlimited
+    half_close: 30s   # how long the other direction may stay open after one side sent EOF
+  tcp:
+    keepalive: 30s    # TCP keepalive period, 0 = disabled
+    nodelay: true
+
+routes:
+  - name: mysql
+    listen: ":3307"
+    upstream: "mysql:3306"
+    timeouts:
+      idle: 8h        # align with MySQL wait_timeout so pooled connections are not cut
+
+  - name: redis
+    listen: ":6380"
+    upstream: "redis:6379"
+    limits:
+      max_connections: 200
+      max_connections_per_ip: 50

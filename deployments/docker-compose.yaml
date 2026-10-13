@@ -1,0 +1,31 @@
+# Demo stack: one proxy in front of MySQL and Redis.
+#   docker compose -f deployments/docker-compose.yaml up --build
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: build/package/Dockerfile
+    ports:
+      - "3307:3307"   # mysql route
+      - "6380:6380"   # redis route
+      - "9090:9090"   # admin: /metrics /healthz /readyz
+    environment:
+      PROXY_LOG_LEVEL: debug
+    stop_grace_period: 40s   # must exceed shutdown_timeout
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
