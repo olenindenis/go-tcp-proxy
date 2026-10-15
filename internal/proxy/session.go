@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"go-tcp-proxy/internal/config"
+	"go-tcp-proxy/internal/metrics"
 )
 
 const (
@@ -33,8 +35,10 @@ type session struct {
 	client   net.Conn
 	upstream net.Conn
 	timeouts config.Timeouts
+	log      *slog.Logger
 
-	lastActivity atomic.Int64
+	lastActivity       atomic.Int64
+	bytesUp, bytesDown atomic.Int64
 
 	halfCloseTimer atomic.Pointer[time.Timer]
 
@@ -42,8 +46,8 @@ type session struct {
 	closeOnce sync.Once
 }
 
-func newSession(client, upstream net.Conn, timeouts config.Timeouts) *session {
-	s := &session{client: client, upstream: upstream, timeouts: timeouts}
+func newSession(client, upstream net.Conn, timeouts config.Timeouts, log *slog.Logger) *session {
+	s := &session{client: client, upstream: upstream, timeouts: timeouts, log: log}
 	s.touch()
 	return s
 }
@@ -78,8 +82,12 @@ func (s *session) run(ctx context.Context, bytesUp, bytesDown prometheus.Counter
 	defer stop()
 
 	var wg sync.WaitGroup
-	wg.Go(func() { s.pipe(s.upstream, s.client, bytesUp, reasonClientError, reasonUpstreamError) })
-	wg.Go(func() { s.pipe(s.client, s.upstream, bytesDown, reasonUpstreamError, reasonClientError) })
+	wg.Go(func() {
+		s.pipe(s.upstream, s.client, bytesUp, &s.bytesUp, metrics.DirClientToUpstream, reasonClientError, reasonUpstreamError)
+	})
+	wg.Go(func() {
+		s.pipe(s.client, s.upstream, bytesDown, &s.bytesDown, metrics.DirUpstreamToClient, reasonUpstreamError, reasonClientError)
+	})
 	wg.Wait()
 	if t := s.halfCloseTimer.Load(); t != nil {
 		t.Stop()
@@ -87,9 +95,12 @@ func (s *session) run(ctx context.Context, bytesUp, bytesDown prometheus.Counter
 	s.close(reasonEOF)
 }
 
-func (s *session) pipe(dst, src net.Conn, bytes prometheus.Counter, srcErrReason, dstErrReason string) {
+func (s *session) pipe(dst, src net.Conn, bytes prometheus.Counter, total *atomic.Int64, dir, srcErrReason, dstErrReason string) {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
+
+	// Logging every chunk is expensive, so the level check is done once per pipe.
+	debug := s.log.Enabled(context.Background(), slog.LevelDebug)
 
 	for {
 		if err := src.SetReadDeadline(s.idleDeadline()); err != nil {
@@ -114,6 +125,11 @@ func (s *session) pipe(dst, src net.Conn, bytes prometheus.Counter, srcErrReason
 			}
 			s.touch()
 			bytes.Add(float64(n))
+			sum := total.Add(int64(n))
+			if debug {
+				s.log.LogAttrs(context.Background(), slog.LevelDebug, "data transferred",
+					slog.String("direction", dir), slog.Int("bytes", n), slog.Int64("total", sum))
+			}
 		}
 		switch {
 		case rerr == nil:

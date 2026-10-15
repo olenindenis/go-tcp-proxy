@@ -64,6 +64,21 @@ make build
 > Для баз даних з пулами з'єднань виставляйте `idle` не меншим за idle-час пулу / `wait_timeout` сервера,
 > інакше proxy закриватиме з'єднання, які пул вважає живими.
 
+## Логи
+
+JSON у stdout, рівень задає `log_level`. Кожне з'єднання має `conn_id` і `client`, щоб записи однієї сесії можна було зв'язати між собою.
+
+| Подія | Рівень | Поля |
+|---|---|---|
+| `connection established` | info | `upstream`, `upstream_local`, `dial_time`, `active` |
+| `connection closed` | info | `reason`, `duration`, `bytes_up`, `bytes_down` |
+| `upstream dial failed` | warn | `upstream`, `err` |
+| `data transferred` | debug | `direction`, `bytes`, `total` |
+
+Proxy не розбирає протокол, тому меж окремих запитів не бачить. `data transferred` пишеться на кожну прочитану
+з сокета порцію даних: один запит може прийти кількома порціями, а кілька запитів (pipelining) - однією.
+На навантаженому маршруті `debug` генерує дуже багато записів.
+
 ## Метрики
 
 Префікс `tcp_proxy_`, у всіх є label `route`.

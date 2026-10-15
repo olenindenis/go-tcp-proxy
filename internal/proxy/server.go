@@ -29,8 +29,9 @@ type Server struct {
 	bytesUp, bytesDown            prometheus.Counter
 	rejected, closed              *prometheus.CounterVec
 
-	ln    net.Listener
-	ready atomic.Bool
+	ln     net.Listener
+	ready  atomic.Bool
+	nextID atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -146,15 +147,23 @@ func (s *Server) serveSession(client net.Conn, ip netip.Addr) {
 	s.activeGauge.Inc()
 	defer s.activeGauge.Dec()
 
+	log := s.log.With("conn_id", s.nextID.Add(1), "client", client.RemoteAddr().String())
+
 	upstream, err := s.dialer.DialContext(s.ctx, "tcp", s.route.Upstream)
-	s.dialDuration.Observe(time.Since(start).Seconds())
+	dialTime := time.Since(start)
+	s.dialDuration.Observe(dialTime.Seconds())
 	if err != nil {
 		_ = client.Close()
 		s.dialErrors.Inc()
 		s.closed.WithLabelValues(reasonDialError).Inc()
-		s.log.Warn("upstream dial failed", "client", ip, "upstream", s.route.Upstream, "err", err)
+		log.Warn("upstream dial failed", "upstream", s.route.Upstream, "err", err)
 		return
 	}
+	log.Info("connection established",
+		"upstream", upstream.RemoteAddr().String(),
+		"upstream_local", upstream.LocalAddr().String(),
+		"dial_time", dialTime.String(),
+		"active", s.lim.active())
 
 	if !s.route.TCP.NoDelay {
 		for _, c := range []net.Conn{client, upstream} {
@@ -164,13 +173,17 @@ func (s *Server) serveSession(client net.Conn, ip netip.Addr) {
 		}
 	}
 
-	sess := newSession(client, upstream, s.route.Timeouts)
+	sess := newSession(client, upstream, s.route.Timeouts, log)
 	sess.run(s.ctx, s.bytesUp, s.bytesDown)
 
 	reason := sess.closeReason()
 	s.closed.WithLabelValues(reason).Inc()
 	s.sessionDuration.Observe(time.Since(start).Seconds())
-	s.log.Debug("session closed", "client", ip, "reason", reason, "duration", time.Since(start).String())
+	log.Info("connection closed",
+		"reason", reason,
+		"duration", time.Since(start).String(),
+		"bytes_up", sess.bytesUp.Load(),
+		"bytes_down", sess.bytesDown.Load())
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
